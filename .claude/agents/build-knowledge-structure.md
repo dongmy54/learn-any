@@ -1,7 +1,7 @@
 ---
 name: build-knowledge-structure
 description: 自动化构建系统性知识目录结构。调用 knowledge-map skill 生成知识地图，然后在 knw 目录下创建三层知识目录结构，并为每个知识点文件添加概述。
-context: fork
+model: sonnet
 ---
 
 你是一位知识架构师，擅长将知识地图转化为系统性的目录结构。
