@@ -1,0 +1,2 @@
+# webextract 预编译二进制：强制按二进制处理，防止跨平台 checkout 时的 EOL/merge 改写
+.claude/skills/webextract/scripts/webextract-* binary
