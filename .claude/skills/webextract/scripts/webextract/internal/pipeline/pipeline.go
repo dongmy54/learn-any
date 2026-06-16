@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 
+	"webextract/internal/codeguard"
 	"webextract/internal/converter"
 	"webextract/internal/extractor"
 	"webextract/internal/fetcher"
@@ -22,17 +23,24 @@ func Run(ctx context.Context, f fetcher.Fetcher, rawURL, format string, w io.Wri
 		return fmt.Errorf("抓取失败: %w", err)
 	}
 
-	// 2. 提取正文 + 元数据
+	// 2. 保护代码块：把 <pre> 的 table+shiki 高亮结构抽成纯文本，就地重写成
+	// 标准 <pre><code>，否则 readability 会把这种复杂结构的代码块当噪声丢弃。
+	protectedHTML, blocks := codeguard.Protect(html)
+
+	// 3. 提取正文 + 元数据
 	pageURL, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("URL 非法: %w", err)
 	}
-	art, err := extractor.Extract(html, pageURL)
+	art, err := extractor.Extract(protectedHTML, pageURL)
 	if err != nil {
 		return fmt.Errorf("正文提取失败: %w", err)
 	}
 
-	// 3. 正文 HTML → Markdown
+	// 4. 补回代码块语言：readability 会剥掉 <code> 的 class，按序号标记把语言补回。
+	art.HTML = codeguard.StampLanguage(art.HTML, blocks)
+
+	// 5. 正文 HTML → Markdown
 	art.Markdown, err = converter.ToMarkdown(art.HTML)
 	if err != nil {
 		return fmt.Errorf("Markdown 转换失败: %w", err)
