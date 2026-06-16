@@ -43,6 +43,15 @@ func Run(ctx context.Context, f fetcher.Fetcher, rawURL, format string, w io.Wri
 		return fmt.Errorf("正文提取失败: %w", err)
 	}
 
+	// 3.5 完整性兜底：readability 对文档框架/表格密集页会整片丢弃结构化内容。
+	// 若存在更完整的语义主容器（main/article/[role=main]），改用其完整子树作正文，
+	// 保证内容不丢失、顺序不错乱。普通文章页判定为不更完整，沿用 readability。
+	usedContainer := false
+	if cart, ok := extractor.CompleteArticle(protectedHTML, art, pageURL); ok {
+		art = cart
+		usedContainer = true
+	}
+
 	// 4. 补回代码块语言：readability 会剥掉 <code> 的 class，按序号标记把语言补回。
 	art.HTML = codeguard.StampLanguage(art.HTML, blocks)
 
@@ -56,7 +65,10 @@ func Run(ctx context.Context, f fetcher.Fetcher, rawURL, format string, w io.Wri
 	}
 
 	// 5.5 回填被 readability 丢弃的表格（已保留的不会重复）。
-	art.Markdown = tableguard.Restore(art.Markdown, savedTables, presentTables)
+	// 容器路径下表格已就地完整，跳过回填，避免把主容器之外的噪声表格误并进来。
+	if !usedContainer {
+		art.Markdown = tableguard.Restore(art.Markdown, savedTables, presentTables)
+	}
 
 	// 6. 按格式输出
 	return render(w, art, format)
