@@ -18,13 +18,22 @@ func urlToPath(rawURL, outputDir string, isSeed bool) string {
 	name := "index"
 	if !isSeed {
 		slug := strings.Trim(u.Path, "/")
-		if slug != "" {
+		if slug == "" {
+			// 站点根（如 https://host/）：不能叫 index，否则会覆盖种子专属的 index.md
+			name = "home"
+		} else {
 			name = strings.ReplaceAll(slug, "/", "-")
 		}
 		// 同 path 不同 query：追加短哈希，避免互相覆盖
 		if u.RawQuery != "" {
 			sum := sha1.Sum([]byte(u.RawQuery))
 			name += "_" + hex.EncodeToString(sum[:4])
+		}
+		// 兜底：index.md 是种子专属文件名，任何非种子页都不得占用，
+		// 否则爬到的根页/路径恰为 "index" 的页面会覆盖种子页（曾导致种子内容丢失）。
+		if name == "index" {
+			sum := sha1.Sum([]byte(rawURL))
+			name = "index_" + hex.EncodeToString(sum[:4])
 		}
 	}
 	return filepath.Join(outputDir, u.Hostname(), name+".md")

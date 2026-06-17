@@ -1,7 +1,7 @@
 // Package crawler 在 webextract 既有能力之上增加「批量爬取」调度层：
 //
 //   - 复用 fetcher.Fetcher 拿整页 HTML
-//   - 复用 extractor / converter 提取正文并转 Markdown
+//   - 复用 pipeline.BuildArticle 提取正文并转 Markdown（与单页完全同一套完整性管线）
 //   - 新增：goquery 抽链接、BFS 调度、去重、并发 worker pool、批量落盘
 //
 // 设计要点：主链接（种子）由主 goroutine 同步优先抓取，保证其内容优先且必达；
@@ -16,9 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"webextract/internal/converter"
-	"webextract/internal/extractor"
 	"webextract/internal/fetcher"
+	"webextract/internal/pipeline"
 )
 
 // Task 是一个待抓取任务。
@@ -82,15 +81,11 @@ func Crawl(ctx context.Context, seed string, f fetcher.Fetcher, opt Options) (*R
 	if err != nil {
 		return st.report(), fmt.Errorf("主链接抓取失败: %w", err)
 	}
-	art, err := extractor.Extract(html, seedURL)
+	// 与单页共用 pipeline.BuildArticle：代码块保护 + 完整性兜底 + 表格回填，确保种子页完整。
+	art, err := pipeline.BuildArticle(html, seedURL)
 	if err != nil {
 		return st.report(), fmt.Errorf("主链接正文提取失败: %w", err)
 	}
-	md, err := converter.ToMarkdown(art.HTML)
-	if err != nil {
-		return st.report(), fmt.Errorf("主链接 Markdown 转换失败: %w", err)
-	}
-	art.Markdown = md
 	st.url2file[seed] = WriteArticle(opt.OutputDir, art, true) // true → index.md
 	atomic.StoreInt64(&st.written, 1)
 	atomic.StoreInt64(&st.claimed, 1) // 种子已占一个抓取名额（计入 --max）
@@ -175,17 +170,12 @@ func (s *state) processOne(ctx context.Context, f fetcher.Fetcher, opt Options,
 		return
 	}
 	pageURL, _ := url.Parse(t.URL)
-	art, err := extractor.Extract(html, pageURL)
+	// 与单页/种子页共用同一套完整性管线，保证批量抓取的每页内容同样完整。
+	art, err := pipeline.BuildArticle(html, pageURL)
 	if err != nil {
 		atomic.AddInt64(&s.failed, 1)
 		return
 	}
-	md, err := converter.ToMarkdown(art.HTML)
-	if err != nil {
-		atomic.AddInt64(&s.failed, 1)
-		return
-	}
-	art.Markdown = md
 	path := WriteArticle(opt.OutputDir, art, false)
 	s.mu.Lock()
 	s.url2file[t.URL] = path

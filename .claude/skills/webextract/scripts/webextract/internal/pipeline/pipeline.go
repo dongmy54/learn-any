@@ -15,7 +15,7 @@ import (
 	"webextract/internal/tableguard"
 )
 
-// Run 是流水线的编排核心：Fetch → Extract → Convert → Render。
+// Run 是流水线的编排核心：Fetch → BuildArticle → Render。
 // 它只依赖 Fetcher 接口，对静态/动态实现完全无感知——这是可扩展性的来源。
 func Run(ctx context.Context, f fetcher.Fetcher, rawURL, format string, w io.Writer) error {
 	// 1. 抓取（策略可替换）
@@ -24,26 +24,44 @@ func Run(ctx context.Context, f fetcher.Fetcher, rawURL, format string, w io.Wri
 		return fmt.Errorf("抓取失败: %w", err)
 	}
 
-	// 2. 保护代码块：把 <pre> 的 table+shiki 高亮结构抽成纯文本，就地重写成
-	// 标准 <pre><code>，否则 readability 会把这种复杂结构的代码块当噪声丢弃。
-	protectedHTML, blocks := codeguard.Protect(html)
+	pageURL, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("URL 非法: %w", err)
+	}
 
-	// 2.5 抢救正文表格：Fern/Mintlify 等框架把表格单独裹在低密度容器里，readability
+	// 2. 提取完整正文（与批量抓取共用同一套核心，保证两者完整性一致）
+	art, err := BuildArticle(html, pageURL)
+	if err != nil {
+		return err
+	}
+
+	// 3. 按格式输出
+	return render(w, art, format)
+}
+
+// BuildArticle 把一段原始 HTML 处理成正文完整的 Article（已填充 Markdown）。
+//
+// 这是「单页」与「批量抓取」共用的提取核心——批量本质上就是对每个页面跑同一套流程，
+// 因此必须共用此函数，否则两条路径的完整性会分叉（曾出现 crawl 跳过兜底导致内容残缺）。
+//
+// 处理链：代码块保护 → readability 提取 → 完整性兜底 → 补回代码语言 → 转 Markdown → 回填丢失表格。
+func BuildArticle(rawHTML string, pageURL *url.URL) (*model.Article, error) {
+	// 1. 保护代码块：把 <pre> 的 table+shiki 高亮结构抽成纯文本，就地重写成
+	// 标准 <pre><code>，否则 readability 会把这种复杂结构的代码块当噪声丢弃。
+	protectedHTML, blocks := codeguard.Protect(rawHTML)
+
+	// 2. 抢救正文表格：Fern/Mintlify 等框架把表格单独裹在低密度容器里，readability
 	// 会把整个容器连同表格一起排除。先在 readability 之前收集所有正文表格的 markdown，
 	// 提取后再把丢失的回填到正文末尾。详见 tableguard 包注释。
 	savedTables := tableguard.Collect(protectedHTML)
 
 	// 3. 提取正文 + 元数据
-	pageURL, err := url.Parse(rawURL)
-	if err != nil {
-		return fmt.Errorf("URL 非法: %w", err)
-	}
 	art, err := extractor.Extract(protectedHTML, pageURL)
 	if err != nil {
-		return fmt.Errorf("正文提取失败: %w", err)
+		return nil, fmt.Errorf("正文提取失败: %w", err)
 	}
 
-	// 3.5 完整性兜底：readability 对文档框架/表格密集页会整片丢弃结构化内容。
+	// 4. 完整性兜底：readability 对文档框架/表格密集页会整片丢弃结构化内容。
 	// 若存在更完整的语义主容器（main/article/[role=main]），改用其完整子树作正文，
 	// 保证内容不丢失、顺序不错乱。普通文章页判定为不更完整，沿用 readability。
 	usedContainer := false
@@ -52,26 +70,25 @@ func Run(ctx context.Context, f fetcher.Fetcher, rawURL, format string, w io.Wri
 		usedContainer = true
 	}
 
-	// 4. 补回代码块语言：readability 会剥掉 <code> 的 class，按序号标记把语言补回。
+	// 5. 补回代码块语言：readability 会剥掉 <code> 的 class，按序号标记把语言补回。
 	art.HTML = codeguard.StampLanguage(art.HTML, blocks)
 
-	// 4.5 探测 readability 实际保留了哪些表格，供后续去重回填。
+	// 6. 探测 readability 实际保留了哪些表格，供后续去重回填。
 	presentTables := tableguard.PresentSignatures(art.HTML)
 
-	// 5. 正文 HTML → Markdown（含 Table 插件，幸存的表格在此转换为 GFM）
+	// 7. 正文 HTML → Markdown（含 Table 插件，幸存的表格在此转换为 GFM）
 	art.Markdown, err = converter.ToMarkdown(art.HTML)
 	if err != nil {
-		return fmt.Errorf("Markdown 转换失败: %w", err)
+		return nil, fmt.Errorf("Markdown 转换失败: %w", err)
 	}
 
-	// 5.5 回填被 readability 丢弃的表格（已保留的不会重复）。
+	// 8. 回填被 readability 丢弃的表格（已保留的不会重复）。
 	// 容器路径下表格已就地完整，跳过回填，避免把主容器之外的噪声表格误并进来。
 	if !usedContainer {
 		art.Markdown = tableguard.Restore(art.Markdown, savedTables, presentTables)
 	}
 
-	// 6. 按格式输出
-	return render(w, art, format)
+	return art, nil
 }
 
 func render(w io.Writer, art *model.Article, format string) error {
